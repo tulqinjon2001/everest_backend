@@ -185,7 +185,7 @@ router.get('/:id', async (req, res) => {
 // @access  Private (Teacher only)
 router.post('/', authorize('teacher'), upload.single('file'), async (req, res) => {
   try {
-    const { name, description, category, assignmentType, groupId, studentId } = req.body;
+  const { name, description, category, assignmentType, groupId, studentId, studentIds, deadline } = req.body;
 
     if (!name || !category || !assignmentType) {
       return res.status(400).json({
@@ -215,14 +215,15 @@ router.post('/', authorize('teacher'), upload.single('file'), async (req, res) =
       });
     }
 
-    if (assignmentType === 'individual' && !studentId) {
+    // For individual assignment require either studentId or non-empty studentIds array
+    if (assignmentType === 'individual' && !(studentId || (Array.isArray(studentIds) && studentIds.length))) {
       return res.status(400).json({
         success: false,
         message: 'studentId is required for individual assignments'
       });
     }
 
-    // Verify group or student belongs to teacher
+    // Verify group or student(s) belongs to teacher
     if (assignmentType === 'group') {
       const group = await Group.findById(groupId);
       if (!group || group.teacherId.toString() !== req.user._id.toString()) {
@@ -232,36 +233,86 @@ router.post('/', authorize('teacher'), upload.single('file'), async (req, res) =
         });
       }
     } else {
-      const student = await Student.findById(studentId);
-      if (!student || student.teacherId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({
-          success: false,
-          message: 'Not authorized to assign homework to this student'
-        });
+      // individual: check single studentId or each id in studentIds
+      const idsToCheck = Array.isArray(studentIds) && studentIds.length ? studentIds : [studentId];
+      for (const id of idsToCheck) {
+        const student = await Student.findById(id);
+        if (!student || student.teacherId.toString() !== req.user._id.toString()) {
+          return res.status(403).json({
+            success: false,
+            message: `Not authorized to assign homework to student ${id}`
+          });
+        }
       }
     }
 
-    // Handle file upload
+    // Validate deadline if provided
+    let deadlineDate = null;
+    if (deadline) {
+      const parsed = new Date(deadline);
+      if (isNaN(parsed.getTime())) {
+        return res.status(400).json({ success: false, message: 'Invalid deadline format' });
+      }
+      // optional: ensure deadline is in the future
+      // if (parsed <= new Date()) return res.status(400).json({ success: false, message: 'Deadline must be in the future' });
+      deadlineDate = parsed;
+    }
+
+    // Handle file upload or external link
+    const { link } = req.body;
     let fileUrl = null;
     if (req.file) {
       fileUrl = `/uploads/${category.toLowerCase()}/${req.file.filename}`;
     } else if (category !== 'TEXT') {
-      return res.status(400).json({
-        success: false,
-        message: 'File is required for non-TEXT categories'
+      // allow link as alternative to file
+      if (!link) {
+        return res.status(400).json({
+          success: false,
+          message: 'File or link is required for non-TEXT categories'
+        });
+      }
+    }
+
+    // Create homework(s)
+    if (assignmentType === 'individual' && Array.isArray(studentIds) && studentIds.length) {
+      const docs = studentIds.map(id => ({
+        name,
+        description: description || '',
+        category,
+        fileUrl,
+        link: link || null,
+        teacherId: req.user._id,
+        groupId: null,
+        studentId: id,
+        assignmentType,
+        status: 'new',
+        deadline: deadlineDate
+      }));
+
+      const created = await Homework.insertMany(docs);
+      const createdHomework = await Homework.find({ _id: { $in: created.map(c => c._id) } })
+        .populate('groupId', 'name')
+        .populate('studentId', 'fullName');
+
+      return res.status(201).json({
+        success: true,
+        data: createdHomework
       });
     }
 
+    // fallback: single homework (group or individual with studentId)
     const homework = await Homework.create({
       name,
       description: description || '',
       category,
       fileUrl,
+      link: link || null,
       teacherId: req.user._id,
       groupId: assignmentType === 'group' ? groupId : null,
       studentId: assignmentType === 'individual' ? studentId : null,
       assignmentType,
-      status: 'new'
+      status: 'new',
+      deadline: deadlineDate
     });
 
     const createdHomework = await Homework.findById(homework._id)

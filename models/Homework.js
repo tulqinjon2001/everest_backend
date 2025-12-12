@@ -10,12 +10,22 @@ const homeworkSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  // Optional deadline for the homework
+  deadline: {
+    type: Date,
+    default: null
+  },
   category: {
     type: String,
     enum: ['TEXT', 'AUDIO', 'VIDEO', 'PHOTO', 'FILE'],
     required: true
   },
   fileUrl: {
+    type: String,
+    default: null
+  },
+  // Optional external link (e.g., YouTube) for the homework
+  link: {
     type: String,
     default: null
   },
