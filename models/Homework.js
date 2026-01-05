@@ -1,16 +1,41 @@
 const mongoose = require('mongoose');
 
-const homeworkSchema = new mongoose.Schema({
+// Rasm sxemasi - har bir topshiriqdagi rasmlar uchun
+const ImageSchema = new mongoose.Schema({
+  filename: {
+    type: String,
+    required: true
+  },
+  path: {
+    type: String,
+    required: true
+  },
+  mimetype: {
+    type: String
+  },
+  size: {
+    type: Number
+  },
+  url: {
+    type: String
+  }
+}, { _id: false });
+
+// Topshiriq sxemasi - har bir task uchun
+const AssignmentSchema = new mongoose.Schema({
   name: {
     type: String,
-    required: true,
-    trim: true
+    required: true
   },
+  images: [ImageSchema]
+});
+
+// Asosiy Homework sxemasi
+const HomeworkSchema = new mongoose.Schema({
   description: {
     type: String,
     default: ''
   },
-  // Optional deadline for the homework
   deadline: {
     type: Date,
     default: null
@@ -20,11 +45,6 @@ const homeworkSchema = new mongoose.Schema({
     enum: ['TEXT', 'AUDIO', 'VIDEO', 'PHOTO', 'FILE'],
     required: true
   },
-  fileUrl: {
-    type: String,
-    default: null
-  },
-  // Optional external link (e.g., YouTube) for the homework
   link: {
     type: String,
     default: null
@@ -49,6 +69,8 @@ const homeworkSchema = new mongoose.Schema({
     enum: ['group', 'individual'],
     required: true
   },
+  // Ko'p topshiriqlar massivi
+  assignments: [AssignmentSchema],
   status: {
     type: String,
     enum: ['new', 'pending', 'reviewed'],
@@ -58,5 +80,5 @@ const homeworkSchema = new mongoose.Schema({
   timestamps: true
 });
 
-module.exports = mongoose.model('Homework', homeworkSchema);
+module.exports = mongoose.model('Homework', HomeworkSchema);
 

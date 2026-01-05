@@ -81,10 +81,12 @@ router.get('/:id', async (req, res) => {
       const submission = submissions.find(sub => 
         sub.homeworkId.toString() === hw._id.toString()
       );
+      const now = new Date();
+      const deadlinePassed = hw.deadline ? (now > new Date(hw.deadline)) : false;
       return {
         ...hw.toObject(),
         submission: submission || null,
-        canSubmit: !submission && hw.status === 'new'
+        canSubmit: !submission && hw.status === 'new' && !deadlinePassed
       };
     });
 
@@ -101,6 +103,50 @@ router.get('/:id', async (req, res) => {
       success: false,
       message: 'Server error'
     });
+  }
+});
+
+// @route   GET /api/students/:id/homeworks
+// @desc    Get only homeworks for a student (teacher only)
+// @access  Private (Teacher only)
+router.get('/:id/homeworks', authorize('teacher'), async (req, res) => {
+  try {
+    const student = await Student.findById(req.params.id);
+
+    if (!student) {
+      return res.status(404).json({ success: false, message: 'Student not found' });
+    }
+
+    // Only the teacher who owns the student can access
+    if (student.teacherId.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ success: false, message: 'Not authorized to access this student' });
+    }
+
+    const homeworks = await Homework.find({
+      $or: [
+        { studentId: student._id },
+        { groupId: student.groupId, assignmentType: 'group' }
+      ]
+    }).sort({ createdAt: -1 });
+
+    const submissions = await HomeworkSubmission.find({ studentId: student._id })
+      .populate('homeworkId', 'name description category');
+
+    const homeworksWithStatus = homeworks.map(hw => {
+      const submission = submissions.find(sub => sub.homeworkId.toString() === hw._id.toString());
+      const now = new Date();
+      const deadlinePassed = hw.deadline ? (now > new Date(hw.deadline)) : false;
+      return {
+        ...hw.toObject(),
+        submission: submission || null,
+        canSubmit: !submission && hw.status === 'new' && !deadlinePassed
+      };
+    });
+
+    res.json({ success: true, data: { student: { _id: student._id, fullName: student.fullName, groupId: student.groupId }, homeworks: homeworksWithStatus } });
+  } catch (error) {
+    console.error('Get student homeworks error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 

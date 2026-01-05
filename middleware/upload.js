@@ -13,40 +13,25 @@ const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     const category = req.body.category || 'FILE';
     const categoryDir = path.join(uploadsDir, category.toLowerCase());
-    
+
     if (!fs.existsSync(categoryDir)) {
       fs.mkdirSync(categoryDir, { recursive: true });
     }
-    
+
     cb(null, categoryDir);
   },
   filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
     cb(null, uniqueSuffix + path.extname(file.originalname));
   }
 });
 
 // File filter
 const fileFilter = (req, file, cb) => {
-  const category = req.body.category || 'FILE';
-  
-  const allowedTypes = {
-    'AUDIO': ['.mp3', '.wav', '.ogg', '.m4a', '.aac'],
-    'VIDEO': ['.mp4', '.avi', '.mov', '.wmv', '.flv', '.mkv'],
-    'PHOTO': ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'],
-    'FILE': ['.pdf', '.doc', '.docx', '.txt', '.zip', '.rar', '.xls', '.xlsx', '.ppt', '.pptx']
-  };
-  
-  const ext = path.extname(file.originalname).toLowerCase();
-  const allowed = allowedTypes[category] || allowedTypes['FILE'];
-  
-  if (allowed.includes(ext)) {
-    cb(null, true);
-  } else {
-    cb(new Error(`Invalid file type for category ${category}. Allowed: ${allowed.join(', ')}`), false);
-  }
+  cb(null, true); // Allow all file types
 };
 
+// Dynamic field handling for assignments[].images
 const upload = multer({
   storage: storage,
   limits: {
@@ -54,6 +39,11 @@ const upload = multer({
   },
   fileFilter: fileFilter
 });
+
+upload.dynamicFields = (fields) => {
+  const multerFields = fields.map((field) => ({ name: field, maxCount: 10 }));
+  return upload.fields(multerFields);
+};
 
 module.exports = upload;
 

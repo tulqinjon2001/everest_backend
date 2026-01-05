@@ -10,11 +10,18 @@ const fs = require('fs');
 
 const router = express.Router();
 
+// Helper function to build full URL for images
+const buildImageUrl = (req, filename, category) => {
+  const protocol = req.protocol;
+  const host = req.get('host');
+  return `${protocol}://${host}/uploads/${category.toLowerCase()}/${filename}`;
+};
+
 // All routes require authentication
 router.use(protect);
 
 // @route   GET /api/homework
-// @desc    Get all homeworks
+// @desc    Get all homeworks with assignments
 // @access  Private
 router.get('/', async (req, res) => {
   try {
@@ -42,6 +49,21 @@ router.get('/', async (req, res) => {
       .populate('studentId', 'fullName')
       .sort({ createdAt: -1 });
 
+    // Build full URLs for all images in assignments
+    const homeworksWithUrls = homeworks.map(hw => {
+      const hwObj = hw.toObject();
+      if (hwObj.assignments && hwObj.assignments.length > 0) {
+        hwObj.assignments = hwObj.assignments.map(assignment => ({
+          ...assignment,
+          images: assignment.images ? assignment.images.map(img => ({
+            ...img,
+            url: buildImageUrl(req, img.filename, hwObj.category)
+          })) : []
+        }));
+      }
+      return hwObj;
+    });
+
     // For students, add submission status
     if (req.user.role === 'student') {
       const student = await Student.findById(req.user.studentId);
@@ -49,14 +71,16 @@ router.get('/', async (req, res) => {
         studentId: student._id
       });
 
-      const homeworksWithStatus = homeworks.map(hw => {
+      const homeworksWithStatus = homeworksWithUrls.map(hw => {
         const submission = submissions.find(sub => 
           sub.homeworkId.toString() === hw._id.toString()
         );
+        const now = new Date();
+        const deadlinePassed = hw.deadline ? (now > new Date(hw.deadline)) : false;
         return {
-          ...hw.toObject(),
+          ...hw,
           submission: submission || null,
-          canSubmit: !submission && hw.status === 'new'
+          canSubmit: !submission && hw.status === 'new' && !deadlinePassed
         };
       });
 
@@ -69,8 +93,8 @@ router.get('/', async (req, res) => {
 
     res.json({
       success: true,
-      count: homeworks.length,
-      data: homeworks
+      count: homeworksWithUrls.length,
+      data: homeworksWithUrls
     });
   } catch (error) {
     console.error('Get homeworks error:', error);
@@ -82,7 +106,7 @@ router.get('/', async (req, res) => {
 });
 
 // @route   GET /api/homework/:id
-// @desc    Get single homework
+// @desc    Get single homework with assignments
 // @access  Private
 router.get('/:id', async (req, res) => {
   try {
@@ -99,11 +123,23 @@ router.get('/:id', async (req, res) => {
     }
 
     // Check access
-    if (req.user.role === 'teacher' && homework.teacherId.toString() !== req.user._id.toString()) {
+    if (req.user.role === 'teacher' && homework.teacherId._id.toString() !== req.user._id.toString()) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized'
       });
+    }
+
+    // Build full URLs for images
+    const hwObj = homework.toObject();
+    if (hwObj.assignments && hwObj.assignments.length > 0) {
+      hwObj.assignments = hwObj.assignments.map(assignment => ({
+        ...assignment,
+        images: assignment.images ? assignment.images.map(img => ({
+          ...img,
+          url: buildImageUrl(req, img.filename, hwObj.category)
+        })) : []
+      }));
     }
 
     if (req.user.role === 'student') {
@@ -116,8 +152,8 @@ router.get('/:id', async (req, res) => {
       }
 
       const hasAccess = 
-        homework.studentId && homework.studentId.toString() === student._id.toString() ||
-        homework.groupId && homework.groupId.toString() === student.groupId?.toString();
+        homework.studentId && homework.studentId._id.toString() === student._id.toString() ||
+        homework.groupId && homework.groupId._id.toString() === student.groupId?.toString();
 
       if (!hasAccess) {
         return res.status(403).json({
@@ -132,12 +168,14 @@ router.get('/:id', async (req, res) => {
         studentId: student._id
       });
 
+      const now = new Date();
+      const deadlinePassed = homework.deadline ? (now > new Date(homework.deadline)) : false;
       return res.json({
         success: true,
         data: {
-          ...homework.toObject(),
+          ...hwObj,
           submission: submission || null,
-          canSubmit: !submission && homework.status === 'new'
+          canSubmit: !submission && homework.status === 'new' && !deadlinePassed
         }
       });
     }
@@ -152,7 +190,7 @@ router.get('/:id', async (req, res) => {
       return res.json({
         success: true,
         data: {
-          ...homework.toObject(),
+          ...hwObj,
           submissions,
           groupStudents: group?.students || []
         }
@@ -166,7 +204,7 @@ router.get('/:id', async (req, res) => {
       return res.json({
         success: true,
         data: {
-          ...homework.toObject(),
+          ...hwObj,
           submission: submission || null
         }
       });
@@ -181,153 +219,158 @@ router.get('/:id', async (req, res) => {
 });
 
 // @route   POST /api/homework
-// @desc    Create new homework
+// @desc    Create new homework with multiple assignments
 // @access  Private (Teacher only)
-router.post('/', authorize('teacher'), upload.single('file'), async (req, res) => {
+router.post('/', authorize('teacher'), upload.any(), async (req, res, next) => {
   try {
-  const { name, description, category, assignmentType, groupId, studentId, studentIds, deadline } = req.body;
-
-    if (!name || !category || !assignmentType) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide name, category, and assignmentType'
-      });
+    console.log('=== DEBUG: req.body ===');
+    console.log(JSON.stringify(req.body, null, 2));
+    console.log('=== DEBUG: req.body keys ===');
+    console.log(Object.keys(req.body));
+    console.log('=== DEBUG: req.files ===');
+    if (req.files) {
+      console.log(req.files.map(f => ({ fieldname: f.fieldname, filename: f.filename })));
     }
 
-    if (!['TEXT', 'AUDIO', 'VIDEO', 'PHOTO', 'FILE'].includes(category)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid category. Must be TEXT, AUDIO, VIDEO, PHOTO, or FILE'
-      });
-    }
+    const {
+      description,
+      deadline,
+      category,
+      link,
+      assignmentType,
+      studentId,
+      groupId
+    } = req.body;
 
-    if (!['group', 'individual'].includes(assignmentType)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid assignmentType. Must be group or individual'
-      });
-    }
+    const teacherId = req.user._id;
 
-    if (assignmentType === 'group' && !groupId) {
-      return res.status(400).json({
-        success: false,
-        message: 'groupId is required for group assignments'
-      });
-    }
-
-    // For individual assignment require either studentId or non-empty studentIds array
-    if (assignmentType === 'individual' && !(studentId || (Array.isArray(studentIds) && studentIds.length))) {
-      return res.status(400).json({
-        success: false,
-        message: 'studentId is required for individual assignments'
-      });
-    }
-
-    // Verify group or student(s) belongs to teacher
-    if (assignmentType === 'group') {
-      const group = await Group.findById(groupId);
-      if (!group || group.teacherId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({
-          success: false,
-          message: 'Not authorized to assign homework to this group'
-        });
-      }
-    } else {
-      // individual: check single studentId or each id in studentIds
-      const idsToCheck = Array.isArray(studentIds) && studentIds.length ? studentIds : [studentId];
-      for (const id of idsToCheck) {
-        const student = await Student.findById(id);
-        if (!student || student.teacherId.toString() !== req.user._id.toString()) {
-          return res.status(403).json({
-            success: false,
-            message: `Not authorized to assign homework to student ${id}`
-          });
+    // 1. Parse assignments - handle both JSON array and form-data formats
+    let assignments = [];
+    
+    if (req.body.assignments) {
+      // If assignments is already an array (parsed JSON)
+      if (Array.isArray(req.body.assignments)) {
+        assignments = req.body.assignments.map(a => ({
+          name: a.name,
+          images: []
+        }));
+      } 
+      // If assignments is a JSON string
+      else if (typeof req.body.assignments === 'string') {
+        try {
+          const parsed = JSON.parse(req.body.assignments);
+          assignments = parsed.map(a => ({
+            name: a.name,
+            images: []
+          }));
+        } catch (e) {
+          // Not JSON, try other parsing
         }
       }
     }
-
-    // Validate deadline if provided
-    let deadlineDate = null;
-    if (deadline) {
-      const parsed = new Date(deadline);
-      if (isNaN(parsed.getTime())) {
-        return res.status(400).json({ success: false, message: 'Invalid deadline format' });
+    
+    // If no assignments yet, try parsing from form-data fields like assignments[0][name]
+    if (assignments.length === 0) {
+      const assignmentsData = {};
+      for (const key in req.body) {
+        let match = key.match(/assignments\[(\d+)\]\[(\w+)\]/);
+        if (!match) match = key.match(/assignments\[(\d+)\]\.(\w+)/);
+        if (!match) match = key.match(/assignments\.(\d+)\.(\w+)/);
+        
+        if (match) {
+          const index = match[1];
+          const property = match[2];
+          if (!assignmentsData[index]) {
+            assignmentsData[index] = { images: [] };
+          }
+          assignmentsData[index][property] = req.body[key];
+        }
       }
-      // optional: ensure deadline is in the future
-      // if (parsed <= new Date()) return res.status(400).json({ success: false, message: 'Deadline must be in the future' });
-      deadlineDate = parsed;
+      assignments = Object.keys(assignmentsData)
+        .sort((a, b) => parseInt(a) - parseInt(b))
+        .map(key => assignmentsData[key])
+        .filter(a => a.name);
     }
 
-    // Handle file upload or external link
-    const { link } = req.body;
-    let fileUrl = null;
-    if (req.file) {
-      fileUrl = `/uploads/${category.toLowerCase()}/${req.file.filename}`;
-    } else if (category !== 'TEXT') {
-      // allow link as alternative to file
-      if (!link) {
-        return res.status(400).json({
-          success: false,
-          message: 'File or link is required for non-TEXT categories'
-        });
-      }
-    }
-
-    // Create homework(s)
-    if (assignmentType === 'individual' && Array.isArray(studentIds) && studentIds.length) {
-      const docs = studentIds.map(id => ({
-        name,
-        description: description || '',
-        category,
-        fileUrl,
-        link: link || null,
-        teacherId: req.user._id,
-        groupId: null,
-        studentId: id,
-        assignmentType,
-        status: 'new',
-        deadline: deadlineDate
-      }));
-
-      const created = await Homework.insertMany(docs);
-      const createdHomework = await Homework.find({ _id: { $in: created.map(c => c._id) } })
-        .populate('groupId', 'name')
-        .populate('studentId', 'fullName');
-
-      return res.status(201).json({
-        success: true,
-        data: createdHomework
+    // 2. Parse files and attach to corresponding assignments
+    if (req.files && req.files.length > 0) {
+      req.files.forEach(file => {
+        let match = file.fieldname.match(/assignments\[(\d+)\]\[(\w+)\]/);
+        if (!match) match = file.fieldname.match(/assignments\[(\d+)\]\.(\w+)/);
+        
+        if (match) {
+          const index = parseInt(match[1]);
+          if (assignments[index]) {
+            if (!assignments[index].images) {
+              assignments[index].images = [];
+            }
+            assignments[index].images.push({
+              filename: file.filename,
+              path: file.path,
+              mimetype: file.mimetype,
+              size: file.size
+            });
+          }
+        }
       });
     }
 
-    // fallback: single homework (group or individual with studentId)
-    const homework = await Homework.create({
-      name,
-      description: description || '',
+    console.log('Parsed assignments:', JSON.stringify(assignments, null, 2));
+
+    if (!assignments || assignments.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Assignments are required. Each assignment must have a name.'
+      });
+    }
+
+    // 2. Create new Homework object
+    const newHomework = new Homework({
+      teacherId,
+      description,
+      deadline: deadline || null,
       category,
-      fileUrl,
-      link: link || null,
-      teacherId: req.user._id,
-      groupId: assignmentType === 'group' ? groupId : null,
-      studentId: assignmentType === 'individual' ? studentId : null,
+      link,
       assignmentType,
-      status: 'new',
-      deadline: deadlineDate
+      studentId: assignmentType === 'individual' ? studentId : null,
+      groupId: assignmentType === 'group' ? groupId : null,
+      assignments,
+      status: 'new'
     });
 
-    const createdHomework = await Homework.findById(homework._id)
-      .populate('groupId', 'name')
-      .populate('studentId', 'fullName');
+    // 3. Save homework to database
+    const homework = await newHomework.save();
+
+    // 4. Build response with full image URLs
+    const hwObj = homework.toObject();
+    if (hwObj.assignments && hwObj.assignments.length > 0) {
+      hwObj.assignments = hwObj.assignments.map(assignment => ({
+        ...assignment,
+        images: assignment.images ? assignment.images.map(img => ({
+          ...img,
+          url: buildImageUrl(req, img.filename, category)
+        })) : []
+      }));
+    }
 
     res.status(201).json({
       success: true,
-      data: createdHomework
+      data: hwObj
     });
+
   } catch (error) {
     console.error('Create homework error:', error);
+    // Cleanup uploaded files on error
+    if (req.files) {
+      req.files.forEach(file => {
+        fs.unlink(file.path, err => {
+          if (err) console.error(`Error deleting file ${file.path}:`, err);
+        });
+      });
+    }
     res.status(500).json({
       success: false,
-      message: 'Server error'
+      message: 'Server error while creating homework.'
     });
   }
 });
@@ -463,9 +506,9 @@ router.delete('/:id', authorize('teacher'), async (req, res) => {
 });
 
 // @route   POST /api/homework/:id/submit
-// @desc    Submit homework
+// @desc    Submit homework with answers for each assignment
 // @access  Private (Student only)
-router.post('/:id/submit', authorize('student'), upload.single('file'), async (req, res) => {
+router.post('/:id/submit', authorize('student'), upload.any(), async (req, res) => {
   try {
     const homework = await Homework.findById(req.params.id);
 
@@ -509,42 +552,88 @@ router.post('/:id/submit', authorize('student'), upload.single('file'), async (r
       });
     }
 
-    const { textContent } = req.body;
-
-    // Validate submission based on category
-    if (homework.category === 'TEXT') {
-      if (!textContent) {
+    // Reject if deadline passed
+    if (homework.deadline) {
+      const now = new Date();
+      const deadlineDate = new Date(homework.deadline);
+      if (now > deadlineDate) {
         return res.status(400).json({
           success: false,
-          message: 'textContent is required for TEXT category'
-        });
-      }
-    } else {
-      if (!req.file) {
-        return res.status(400).json({
-          success: false,
-          message: 'File is required for this homework category'
+          message: 'Deadline has passed. Submission is not allowed.'
         });
       }
     }
 
-    // Handle file upload
-    let fileUrl = null;
-    if (req.file) {
-      fileUrl = `/uploads/${homework.category.toLowerCase()}/${req.file.filename}`;
+    // Parse answers from req.body and req.files
+    const answersData = {};
+    
+    // Parse text answers: answers[0][textContent], answers[0][assignmentId]
+    for (const key in req.body) {
+      const match = key.match(/answers\[(\d+)\]\[(textContent|assignmentId)\]/);
+      if (match) {
+        const index = match[1];
+        const property = match[2];
+        if (!answersData[index]) {
+          answersData[index] = {};
+        }
+        answersData[index][property] = req.body[key];
+      }
+    }
+
+    // Parse file answers
+    if (req.files && req.files.length > 0) {
+      req.files.forEach(file => {
+        const match = file.fieldname.match(/answers\[(\d+)\]\[file\]/);
+        if (match) {
+          const index = match[1];
+          if (!answersData[index]) {
+            answersData[index] = {};
+          }
+          answersData[index].fileUrl = `/uploads/${homework.category.toLowerCase()}/${file.filename}`;
+          answersData[index].filename = file.filename;
+        }
+      });
+    }
+
+    const answers = Object.values(answersData).map(answer => {
+      // Find assignment name by ID
+      const assignment = homework.assignments.find(
+        a => a._id.toString() === answer.assignmentId
+      );
+      return {
+        assignmentId: answer.assignmentId,
+        assignmentName: assignment ? assignment.name : null,
+        textContent: answer.textContent || null,
+        fileUrl: answer.fileUrl || null,
+        filename: answer.filename || null
+      };
+    });
+
+    if (!answers || answers.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'At least one answer is required for submission'
+      });
     }
 
     const submission = await HomeworkSubmission.create({
       homeworkId: homework._id,
       studentId: student._id,
-      submissionType: homework.category,
-      textContent: homework.category === 'TEXT' ? textContent : null,
-      fileUrl: homework.category !== 'TEXT' ? fileUrl : null,
+      answers,
       status: 'pending'
     });
 
+    // For individual assignments, mark parent homework as pending
+    try {
+      if (homework.assignmentType === 'individual') {
+        await Homework.findByIdAndUpdate(homework._id, { $set: { status: 'pending' } });
+      }
+    } catch (err) {
+      console.error('Failed to update homework status after submission:', err);
+    }
+
     const createdSubmission = await HomeworkSubmission.findById(submission._id)
-      .populate('homeworkId', 'name description category')
+      .populate('homeworkId', 'description category assignments')
       .populate('studentId', 'fullName');
 
     res.status(201).json({
@@ -585,81 +674,48 @@ router.put('/submissions/:id/review', authorize('teacher'), async (req, res) => 
       });
     }
 
-    // Check if teacher owns the homework
-    if (submission.homeworkId.teacherId.toString() !== req.user._id.toString()) {
-      return res.status(403).json({
-        success: false,
-        message: 'Not authorized to review this submission'
-      });
-    }
-
-    submission.status = status;
-    if (teacherComment) submission.teacherComment = teacherComment;
-
-    await submission.save();
-
-    const updatedSubmission = await HomeworkSubmission.findById(submission._id)
-      .populate('homeworkId', 'name description category')
-      .populate('studentId', 'fullName');
-
-    res.json({
-      success: true,
-      data: updatedSubmission
-    });
-  } catch (error) {
-    console.error('Review submission error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
-  }
-});
-
-// @route   GET /api/homework/submissions/:id
-// @desc    Get submission details
-// @access  Private
-router.get('/submissions/:id', async (req, res) => {
-  try {
-    const submission = await HomeworkSubmission.findById(req.params.id)
-      .populate('homeworkId')
-      .populate('studentId', 'fullName phone');
-
-    if (!submission) {
-      return res.status(404).json({
-        success: false,
-        message: 'Submission not found'
-      });
-    }
-
-    // Check access
-    if (req.user.role === 'teacher') {
-      if (submission.homeworkId.teacherId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({
+        // Check if teacher owns the homework
+        if (submission.homeworkId.teacherId.toString() !== req.user._id.toString()) {
+          return res.status(403).json({
+            success: false,
+            message: 'Not authorized to review this submission'
+          });
+        }
+    
+        submission.status = status;
+        if (teacherComment !== undefined) {
+          submission.teacherComment = teacherComment;
+        }
+        submission.reviewedAt = new Date();
+    
+        await submission.save();
+    
+        // For individual assignments, update parent homework status to match review result
+        try {
+          if (submission.homeworkId && submission.homeworkId.assignmentType === 'individual') {
+            await Homework.findByIdAndUpdate(submission.homeworkId._id, { $set: { status } });
+          }
+        } catch (err) {
+          console.error('Failed to update homework status after review:', err);
+        }
+    
+        const updatedSubmission = await HomeworkSubmission.findById(submission._id)
+          .populate('homeworkId', 'name description category assignmentType')
+          .populate('studentId', 'fullName');
+    
+        res.json({
+          success: true,
+          data: updatedSubmission,
+          message: 'Submission reviewed successfully'
+        });
+      } catch (error) {
+        console.error('Review submission error:', error);
+        res.status(500).json({
           success: false,
-          message: 'Not authorized'
+          message: 'Server error'
         });
       }
-    } else if (req.user.role === 'student') {
-      if (submission.studentId._id.toString() !== req.user.studentId.toString()) {
-        return res.status(403).json({
-          success: false,
-          message: 'Not authorized'
-        });
-      }
-    }
-
-    res.json({
-      success: true,
-      data: submission
     });
-  } catch (error) {
-    console.error('Get submission error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
-  }
-});
-
-module.exports = router;
+    
+    module.exports = router;
 

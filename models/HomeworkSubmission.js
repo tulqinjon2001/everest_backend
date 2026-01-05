@@ -1,6 +1,30 @@
 const mongoose = require('mongoose');
 
-const homeworkSubmissionSchema = new mongoose.Schema({
+// Har bir topshiriqqa javob sxemasi
+const AnswerSchema = new mongoose.Schema({
+  assignmentId: {
+    type: mongoose.Schema.Types.ObjectId,
+    required: true
+  },
+  assignmentName: {
+    type: String
+  },
+  textContent: {
+    type: String,
+    default: null
+  },
+  fileUrl: {
+    type: String,
+    default: null
+  },
+  filename: {
+    type: String,
+    default: null
+  }
+});
+
+// Asosiy HomeworkSubmission sxemasi
+const HomeworkSubmissionSchema = new mongoose.Schema({
   homeworkId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Homework',
@@ -11,19 +35,8 @@ const homeworkSubmissionSchema = new mongoose.Schema({
     ref: 'Student',
     required: true
   },
-  submissionType: {
-    type: String,
-    enum: ['TEXT', 'AUDIO', 'VIDEO', 'PHOTO', 'FILE'],
-    required: true
-  },
-  textContent: {
-    type: String,
-    default: null
-  },
-  fileUrl: {
-    type: String,
-    default: null
-  },
+  // Ko'p topshiriqlarga javoblar massivi
+  answers: [AnswerSchema],
   status: {
     type: String,
     enum: ['pending', 'approved', 'rejected'],
@@ -36,10 +49,14 @@ const homeworkSubmissionSchema = new mongoose.Schema({
   submittedAt: {
     type: Date,
     default: Date.now
+  },
+  reviewedAt: {
+    type: Date,
+    default: null
   }
 }, {
   timestamps: true
 });
 
-module.exports = mongoose.model('HomeworkSubmission', homeworkSubmissionSchema);
+module.exports = mongoose.model('HomeworkSubmission', HomeworkSubmissionSchema);
 
