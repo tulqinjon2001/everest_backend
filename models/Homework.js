@@ -42,7 +42,7 @@ const HomeworkSchema = new mongoose.Schema({
   },
   category: {
     type: String,
-    enum: ['TEXT', 'AUDIO', 'VIDEO', 'PHOTO', 'FILE'],
+    enum: ['TEXT', 'AUDIO', 'VIDEO', 'PHOTO', 'FILE', 'DOCUMENT'],
     required: true
   },
   link: {
@@ -59,11 +59,10 @@ const HomeworkSchema = new mongoose.Schema({
     ref: 'Group',
     default: null
   },
-  studentId: {
+  studentIds: [{
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'Student',
-    default: null
-  },
+    ref: 'Student'
+  }],
   assignmentType: {
     type: String,
     enum: ['group', 'individual'],

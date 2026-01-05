@@ -39,14 +39,14 @@ router.get('/', async (req, res) => {
       }
 
       query.$or = [
-        { studentId: student._id },
+        { studentIds: student._id },
         { groupId: student.groupId, assignmentType: 'group' }
       ];
     }
 
     const homeworks = await Homework.find(query)
       .populate('groupId', 'name')
-      .populate('studentId', 'fullName')
+      .populate('studentIds', 'fullName')
       .sort({ createdAt: -1 });
 
     // Build full URLs for all images in assignments
@@ -112,7 +112,7 @@ router.get('/:id', async (req, res) => {
   try {
     const homework = await Homework.findById(req.params.id)
       .populate('groupId', 'name')
-      .populate('studentId', 'fullName phone')
+      .populate('studentIds', 'fullName phone')
       .populate('teacherId', 'fullName');
 
     if (!homework) {
@@ -152,8 +152,8 @@ router.get('/:id', async (req, res) => {
       }
 
       const hasAccess = 
-        homework.studentId && homework.studentId._id.toString() === student._id.toString() ||
-        homework.groupId && homework.groupId._id.toString() === student.groupId?.toString();
+        (homework.studentIds && homework.studentIds.some(s => s._id.toString() === student._id.toString())) ||
+        (homework.groupId && homework.groupId._id.toString() === student.groupId?.toString());
 
       if (!hasAccess) {
         return res.status(403).json({
@@ -187,25 +187,53 @@ router.get('/:id', async (req, res) => {
         homeworkId: homework._id
       }).populate('studentId', 'fullName');
 
-      return res.json({
-        success: true,
-        data: {
-          ...hwObj,
-          submissions,
-          groupStudents: group?.students || []
-        }
+      // Add submission status to each group student
+      const groupStudentsWithStatus = (group?.students || []).map(student => {
+        const submission = submissions.find(s => s.studentId._id.toString() === student._id.toString());
+        return {
+          _id: student._id,
+          fullName: student.fullName,
+          phone: student.phone,
+          submitted: !!submission,
+          submittedAt: submission?.createdAt || null,
+          submission: submission || null
+        };
       });
-    } else {
-      const submission = await HomeworkSubmission.findOne({
-        homeworkId: homework._id,
-        studentId: homework.studentId
-      }).populate('studentId', 'fullName');
 
       return res.json({
         success: true,
         data: {
           ...hwObj,
+          submissions,
+          groupStudents: groupStudentsWithStatus
+        }
+      });
+    } else {
+      // Individual assignment - get submissions for all assigned students
+      const submissions = await HomeworkSubmission.find({
+        homeworkId: homework._id,
+        studentId: { $in: homework.studentIds.map(s => s._id) }
+      }).populate('studentId', 'fullName');
+
+      // Add submission status to each student in studentIds
+      const studentIdsWithStatus = hwObj.studentIds.map(student => {
+        const submission = submissions.find(s => s.studentId._id.toString() === student._id.toString());
+        return {
+          _id: student._id,
+          fullName: student.fullName,
+          phone: student.phone,
+          submitted: !!submission,
+          submittedAt: submission?.createdAt || null,
           submission: submission || null
+        };
+      });
+
+      return res.json({
+        success: true,
+        data: {
+          ...hwObj,
+          studentIds: studentIdsWithStatus,
+          submissions: submissions
         }
       });
     }
@@ -244,11 +272,37 @@ router.post('/', authorize('teacher'), upload.any(), async (req, res, next) => {
 
     const teacherId = req.user._id;
 
-    // 1. Parse assignments - handle both JSON array and form-data formats
+    // 1. Parse assignments - FIRST check form-data fields, then JSON array
     let assignments = [];
+    const assignmentsData = {};
     
-    if (req.body.assignments) {
-      // If assignments is already an array (parsed JSON)
+    // First, try to parse from form-data fields like assignments[0][name]
+    for (const key in req.body) {
+      let match = key.match(/assignments\[(\d+)\]\[(\w+)\]/);
+      if (!match) match = key.match(/assignments\[(\d+)\]\.(\w+)/);
+      if (!match) match = key.match(/assignments\.(\d+)\.(\w+)/);
+      
+      if (match) {
+        const index = match[1];
+        const property = match[2];
+        if (!assignmentsData[index]) {
+          assignmentsData[index] = { images: [] };
+        }
+        assignmentsData[index][property] = req.body[key];
+      }
+    }
+    
+    // Convert form-data parsed assignments to array
+    const formDataAssignments = Object.keys(assignmentsData)
+      .sort((a, b) => parseInt(a) - parseInt(b))
+      .map(key => assignmentsData[key])
+      .filter(a => a.name);
+    
+    if (formDataAssignments.length > 0) {
+      // Use form-data parsed assignments
+      assignments = formDataAssignments;
+    } else if (req.body.assignments) {
+      // Fallback: If assignments is already an array (parsed JSON)
       if (Array.isArray(req.body.assignments)) {
         assignments = req.body.assignments.map(a => ({
           name: a.name,
@@ -264,39 +318,17 @@ router.post('/', authorize('teacher'), upload.any(), async (req, res, next) => {
             images: []
           }));
         } catch (e) {
-          // Not JSON, try other parsing
+          console.log('Failed to parse assignments JSON string:', e);
         }
       }
-    }
-    
-    // If no assignments yet, try parsing from form-data fields like assignments[0][name]
-    if (assignments.length === 0) {
-      const assignmentsData = {};
-      for (const key in req.body) {
-        let match = key.match(/assignments\[(\d+)\]\[(\w+)\]/);
-        if (!match) match = key.match(/assignments\[(\d+)\]\.(\w+)/);
-        if (!match) match = key.match(/assignments\.(\d+)\.(\w+)/);
-        
-        if (match) {
-          const index = match[1];
-          const property = match[2];
-          if (!assignmentsData[index]) {
-            assignmentsData[index] = { images: [] };
-          }
-          assignmentsData[index][property] = req.body[key];
-        }
-      }
-      assignments = Object.keys(assignmentsData)
-        .sort((a, b) => parseInt(a) - parseInt(b))
-        .map(key => assignmentsData[key])
-        .filter(a => a.name);
     }
 
     // 2. Parse files and attach to corresponding assignments
+    // Supports both 'images' and 'files' field names
     if (req.files && req.files.length > 0) {
       req.files.forEach(file => {
-        let match = file.fieldname.match(/assignments\[(\d+)\]\[(\w+)\]/);
-        if (!match) match = file.fieldname.match(/assignments\[(\d+)\]\.(\w+)/);
+        let match = file.fieldname.match(/assignments\[(\d+)\]\[(images|files)\]/);
+        if (!match) match = file.fieldname.match(/assignments\[(\d+)\]\.(images|files)/);
         
         if (match) {
           const index = parseInt(match[1]);
@@ -324,7 +356,35 @@ router.post('/', authorize('teacher'), upload.any(), async (req, res, next) => {
       });
     }
 
-    // 2. Create new Homework object
+    // Handle studentIds for individual assignments
+    let studentIdsArray = [];
+    if (assignmentType === 'individual') {
+      // Get studentIds array (can be from studentIds or studentId)
+      if (req.body.studentIds) {
+        studentIdsArray = Array.isArray(req.body.studentIds) 
+          ? req.body.studentIds 
+          : [req.body.studentIds];
+      } else if (studentId) {
+        studentIdsArray = Array.isArray(studentId) ? studentId : [studentId];
+      }
+
+      // Filter out invalid ObjectIds
+      studentIdsArray = studentIdsArray.filter(id => {
+        if (typeof id === 'string' && /^[a-fA-F0-9]{24}$/.test(id)) {
+          return true;
+        }
+        return false;
+      });
+
+      if (studentIdsArray.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'At least one valid student is required for individual assignments.'
+        });
+      }
+    }
+
+    // Create single homework with studentIds array
     const newHomework = new Homework({
       teacherId,
       description,
@@ -332,16 +392,16 @@ router.post('/', authorize('teacher'), upload.any(), async (req, res, next) => {
       category,
       link,
       assignmentType,
-      studentId: assignmentType === 'individual' ? studentId : null,
+      studentIds: assignmentType === 'individual' ? studentIdsArray : [],
       groupId: assignmentType === 'group' ? groupId : null,
       assignments,
       status: 'new'
     });
 
-    // 3. Save homework to database
+    // Save homework to database
     const homework = await newHomework.save();
 
-    // 4. Build response with full image URLs
+    // Build response with full image URLs
     const hwObj = homework.toObject();
     if (hwObj.assignments && hwObj.assignments.length > 0) {
       hwObj.assignments = hwObj.assignments.map(assignment => ({
@@ -376,9 +436,9 @@ router.post('/', authorize('teacher'), upload.any(), async (req, res, next) => {
 });
 
 // @route   PUT /api/homework/:id
-// @desc    Update homework
+// @desc    Update homework with multiple assignments
 // @access  Private (Teacher only)
-router.put('/:id', authorize('teacher'), upload.single('file'), async (req, res) => {
+router.put('/:id', authorize('teacher'), upload.any(), async (req, res) => {
   try {
     let homework = await Homework.findById(req.params.id);
 
@@ -409,35 +469,208 @@ router.put('/:id', authorize('teacher'), upload.single('file'), async (req, res)
       });
     }
 
-    const { name, description, category } = req.body;
+    console.log('=== PUT DEBUG: req.body ===');
+    console.log(JSON.stringify(req.body, null, 2));
 
-    if (name) homework.name = name;
+    const { description, deadline, category, link, assignmentType, groupId, studentId } = req.body;
+
+    // Update basic fields
     if (description !== undefined) homework.description = description;
-    if (category && ['TEXT', 'AUDIO', 'VIDEO', 'PHOTO', 'FILE'].includes(category)) {
+    if (deadline !== undefined) homework.deadline = deadline || null;
+    if (category && ['TEXT', 'AUDIO', 'VIDEO', 'PHOTO', 'FILE', 'DOCUMENT'].includes(category)) {
       homework.category = category;
     }
-
-    // Handle file upload
-    if (req.file) {
-      // Delete old file if exists
-      if (homework.fileUrl) {
-        const oldFilePath = path.join(__dirname, '..', homework.fileUrl);
-        if (fs.existsSync(oldFilePath)) {
-          fs.unlinkSync(oldFilePath);
+    if (link !== undefined) homework.link = link;
+    
+    // Handle assignmentType change
+    if (assignmentType) {
+      homework.assignmentType = assignmentType;
+      
+      if (assignmentType === 'individual') {
+        // Clear groupId when switching to individual
+        homework.groupId = null;
+        
+        // Set studentIds array
+        if (req.body.studentIds) {
+          let studentIdsArray = Array.isArray(req.body.studentIds) 
+            ? req.body.studentIds 
+            : [req.body.studentIds];
+          
+          // Filter valid ObjectId strings (24 hex characters)
+          studentIdsArray = studentIdsArray.filter(id => 
+            typeof id === 'string' && /^[0-9a-fA-F]{24}$/.test(id)
+          );
+          
+          homework.studentIds = studentIdsArray;
+        }
+      } else if (assignmentType === 'group') {
+        // Clear studentIds when switching to group
+        homework.studentIds = [];
+        if (groupId) {
+          homework.groupId = groupId;
         }
       }
-      homework.fileUrl = `/uploads/${category.toLowerCase()}/${req.file.filename}`;
+    } else {
+      // If assignmentType not changed but studentIds provided, update them
+      if (req.body.studentIds && homework.assignmentType === 'individual') {
+        let studentIdsArray = Array.isArray(req.body.studentIds) 
+          ? req.body.studentIds 
+          : [req.body.studentIds];
+        
+        studentIdsArray = studentIdsArray.filter(id => 
+          typeof id === 'string' && /^[0-9a-fA-F]{24}$/.test(id)
+        );
+        
+        homework.studentIds = studentIdsArray;
+      }
+    }
+
+    // Parse assignments - handle both JSON array and form-data formats
+    let assignments = [];
+    const assignmentsData = {};
+    
+    // First try form-data fields like assignments[0][name]
+    for (const key in req.body) {
+      let match = key.match(/assignments\[(\d+)\]\[(\w+)\](?:\[(\d+)\])?/);
+      
+      if (match) {
+        const index = match[1];
+        const property = match[2];
+        const subIndex = match[3];
+        
+        if (!assignmentsData[index]) {
+          assignmentsData[index] = { images: [], existingImages: [] };
+        }
+        
+        if (property === 'existingImages' && subIndex !== undefined) {
+          assignmentsData[index].existingImages.push(req.body[key]);
+        } else if (property === 'name') {
+          assignmentsData[index].name = req.body[key];
+        } else if (property !== 'existingImages') {
+          assignmentsData[index][property] = req.body[key];
+        }
+      }
+    }
+
+    // Convert form-data to array
+    const formDataAssignments = Object.keys(assignmentsData)
+      .sort((a, b) => parseInt(a) - parseInt(b))
+      .map(key => assignmentsData[key])
+      .filter(a => a.name);
+
+    if (formDataAssignments.length > 0) {
+      assignments = formDataAssignments;
+    } else if (req.body.assignments) {
+      // Fallback: If assignments is already an array (parsed JSON)
+      if (Array.isArray(req.body.assignments)) {
+        assignments = req.body.assignments.map(a => ({
+          name: a.name,
+          images: [],
+          existingImages: a.existingImages || []
+        }));
+      } else if (typeof req.body.assignments === 'string') {
+        try {
+          const parsed = JSON.parse(req.body.assignments);
+          assignments = parsed.map(a => ({
+            name: a.name,
+            images: [],
+            existingImages: a.existingImages || []
+          }));
+        } catch (e) {
+          console.log('Failed to parse assignments JSON:', e);
+        }
+      }
+    }
+
+    // Process existing images - convert URLs back to file info
+    assignments = assignments.map(assignment => {
+      const images = [];
+      
+      // Add existing images (extract filename from URL)
+      if (assignment.existingImages && assignment.existingImages.length > 0) {
+        assignment.existingImages.forEach(url => {
+          const filename = url.split('/').pop();
+          const existingImg = homework.assignments
+            .flatMap(a => a.images || [])
+            .find(img => img.filename === filename);
+          
+          if (existingImg) {
+            images.push(existingImg);
+          } else {
+            images.push({
+              filename: filename,
+              path: `uploads/${homework.category.toLowerCase()}/${filename}`,
+              url: url
+            });
+          }
+        });
+      }
+      
+      return {
+        name: assignment.name,
+        images: images
+      };
+    });
+
+    // Add new uploaded files
+    if (req.files && req.files.length > 0) {
+      req.files.forEach(file => {
+        let match = file.fieldname.match(/assignments\[(\d+)\]\[(images|files)\]/);
+        
+        if (match) {
+          const index = parseInt(match[1]);
+          if (assignments[index]) {
+            assignments[index].images.push({
+              filename: file.filename,
+              path: file.path,
+              mimetype: file.mimetype,
+              size: file.size
+            });
+          }
+        }
+      });
+    }
+
+    console.log('PUT Parsed assignments:', JSON.stringify(assignments, null, 2));
+
+    // Update assignments if provided
+    if (assignments.length > 0) {
+      homework.assignments = assignments;
     }
 
     await homework.save();
 
-    const updatedHomework = await Homework.findById(homework._id)
+    // Build response with full image URLs
+    const hwObj = homework.toObject();
+    if (hwObj.assignments && hwObj.assignments.length > 0) {
+      hwObj.assignments = hwObj.assignments.map(assignment => ({
+        ...assignment,
+        images: assignment.images ? assignment.images.map(img => ({
+          ...img,
+          url: buildImageUrl(req, img.filename, hwObj.category)
+        })) : []
+      }));
+    }
+
+    // Populate for response
+    const populatedHomework = await Homework.findById(homework._id)
       .populate('groupId', 'name')
       .populate('studentId', 'fullName');
 
+    const finalResponse = populatedHomework.toObject();
+    if (finalResponse.assignments && finalResponse.assignments.length > 0) {
+      finalResponse.assignments = finalResponse.assignments.map(assignment => ({
+        ...assignment,
+        images: assignment.images ? assignment.images.map(img => ({
+          ...img,
+          url: buildImageUrl(req, img.filename, finalResponse.category)
+        })) : []
+      }));
+    }
+
     res.json({
       success: true,
-      data: updatedHomework
+      data: finalResponse
     });
   } catch (error) {
     console.error('Update homework error:', error);
